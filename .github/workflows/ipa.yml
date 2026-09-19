@@ -42,6 +42,12 @@ on:
         required: false
         type: boolean
 
+      ytleg:
+        description: "Integrate YouTubeLegacy"
+        default: true
+        required: false
+        type: boolean
+
       ryd:
         description: "Integrate Return-YouTube-Dislikes"
         default: true
@@ -111,7 +117,7 @@ jobs:
       - name: Hide Sensitive Inputs
         uses: levibostian/action-hide-sensitive-inputs@v1
         with:
-          exclude_inputs: bundle_id,display_name,youpip,ytuhd,ryd,abconfig,ytweaks,youslider,gonerino,demc,volboost,repo,branch,youquality
+          exclude_inputs: bundle_id,display_name,youpip,ytuhd,ryd,abconfig,ytweaks,youslider,gonerino,demc,volboost,repo,branch,ytleg,youquality
           
       - name: Install MEGA downloader
         if: ${{ startsWith(inputs.ipa_url, 'https://mega.nz/') }}
@@ -234,7 +240,11 @@ jobs:
       - name: Clone YTUHD
         if: ${{ inputs.ytuhd }}
         run: git clone --quiet --depth=1 --recurse-submodules https://github.com/PoomSmart/YTUHD.git
-           
+
+      - name: Clone YouTubeLegacy
+        if: ${{ inputs.ytleg }}
+        run: git clone --quiet --depth=1 https://github.com/PoomSmart/YouTubeLegacy.git
+        
       - name: Clone Return-YouTube-Dislikes
         if: ${{ inputs.ryd }}
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/Return-YouTube-Dislikes.git
@@ -305,6 +315,13 @@ jobs:
           make libvpx dav1d
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless SIDELOAD=1
           mv packages/*.deb ${{ github.workspace }}/ytuhd.deb
+
+      - name: Build YouTubeLegacy
+        if: ${{ inputs.ytleg }}
+        run: |
+          cd YouTubeLegacy
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*.deb ${{ github.workspace }}/ytleg.deb
 
       - name: Build Return-YouTube-Dislikes
         if: ${{ inputs.ryd }}
