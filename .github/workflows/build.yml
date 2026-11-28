@@ -2,6 +2,7 @@ name: Build YouMod
 on:
   push:
     branches: [ "main" ]
+    paths-ignore: [ "**/README.md" ]
   workflow_dispatch:
     inputs:
       repo:
@@ -12,17 +13,20 @@ on:
         description: 'Branch to build from'
         required: true
         default: 'main'
-   
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}
   cancel-in-progress: true
 
 jobs:
   build:
     name: Build YouMod
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ github.run_number }}
 
     steps:
       - name: Checkout YouMod
@@ -33,10 +37,9 @@ jobs:
           path: YouMod
 
       - name: Install dependencies
-        run: brew install make ldid
-
-      - name: Set PATH environment variables
         run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew install make ldid gnu-sed autoconf automake libtool pkg-config dpkg
           echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
           echo "THEOS=${{ github.workspace }}/theos" >> $GITHUB_ENV
 
@@ -54,65 +57,111 @@ jobs:
         uses: actions/cache@v6
         with:
           path: theos
-          key: YouMod-26.5-SDK-${{ env.THEOS_COMMIT }}
+          key: YouMod-16.5-SDK-${{ env.THEOS_COMMIT }}
 
       - name: Setup Theos
         if: ${{ steps.cache-theos.outputs.cache-hit != 'true' }}
-        run: |
-            git clone --quiet --depth=1 --recurse-submodules https://github.com/roothide/theos.git
-            git clone --quiet --depth=1 -n --filter=tree:0 https://github.com/Tonwalter888/iOS-SDKs.git
-            cd iOS-SDKs
-            git sparse-checkout set --no-cone iPhoneOS26.5.sdk
-            git checkout --quiet
-            mv *.sdk "$THEOS/sdks"
-            cd ${{ github.workspace }}/theos/vendor/logos
-            git checkout a623700
-            
-      - name: Clone headers
-        run: |
-          if [ ! -d "$THEOS/include/YouTubeHeader" ]; then
-            git clone --quiet --depth=1 https://github.com/PoomSmart/YouTubeHeader.git "$THEOS/include/YouTubeHeader"
-          else
-            cd $THEOS/include/YouTubeHeader
-            git pull --quiet --force
-            cd ${{ github.workspace }}
-          fi
-          
-          if [ ! -d "$THEOS/include/PSHeader" ]; then
-            git clone --quiet --depth=1 https://github.com/PoomSmart/PSHeader.git "$THEOS/include/PSHeader"
-          else
-            cd $THEOS/include/PSHeader
-            git pull --quiet --force
-            cd ${{ github.workspace }}
-          fi
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-src: 'https://github.com/roothide/theos'
+          theos-sdks: 'https://github.com/Tonwalter888/iOS-16.5-SDK'
+          theos-sdks-branch: 'main'
 
       - name: Fix Theos od broken pipe issue
-        run: sed -i '' 's/od -c "$i" | head/od -c "$i" 2>\/dev\/null | head/g' $THEOS/bin/convert_xml_plist.sh || true
+        run: sed -i 's/od -c "$i" | head/od -c "$i" 2>\/dev\/null | head/g' "$THEOS/bin/convert_xml_plist.sh"
+
+      - name: Stamp version
+        run: |
+          cd YouMod
+          sed -i '' "s/^Version:.*/Version: $VERSION/" control
+          sed -i '' "s/#define YouModVersion @\".*\"/#define YouModVersion @\"$VERSION\"/" Files/Headers/YouMod.h
+          sed -i '' "s/#define YouModCommit @\".*\"/#define YouModCommit @\"$(git rev-parse HEAD)\"/" Files/Headers/YouMod.h
+          grep '^Version:' control
+          grep 'define YouMod\(Version\|Commit\)' Files/Headers/YouMod.h
 
       - name: Build YouMod
         run: |
           cd YouMod
-          echo "YOUMOD_VERSION=$(grep '^Version:' control | cut -d ' ' -f2)" >> $GITHUB_ENV
           make clean package DEBUG=0 FINALPACKAGE=1
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
           mv packages/*.deb ${{ github.workspace }}
 
-      - name: Upload the tweak .deb(s)
+      - name: Upload rootful .deb
         uses: actions/upload-artifact@v7
         with:
-         name: YouMod v${{ env.YOUMOD_VERSION }}
-         path: ${{ github.workspace }}/*.deb
-         if-no-files-found: error
-         overwrite: true
+          name: YouMod build ${{ env.VERSION }} rootful
+          path: ${{ github.workspace }}/*_iphoneos-arm.deb
+          if-no-files-found: error
+          overwrite: true
 
-      - name: Create a draft release
-        uses: softprops/action-gh-release@v3
+      - name: Upload rootless .deb
+        uses: actions/upload-artifact@v7
         with:
-          tag_name: v${{ env.YOUMOD_VERSION }}
-          name: v${{ env.YOUMOD_VERSION }} 
-          files: |
-             dev.water888.youmod_${{ env.YOUMOD_VERSION }}_iphoneos-arm.deb
-             dev.water888.youmod_${{ env.YOUMOD_VERSION }}_iphoneos-arm64.deb
-             dev.water888.youmod_${{ env.YOUMOD_VERSION }}_iphoneos-arm64e.deb
-          draft: true
+          name: YouMod build ${{ env.VERSION }} rootless
+          path: ${{ github.workspace }}/*_iphoneos-arm64.deb
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Upload roothide .deb
+        uses: actions/upload-artifact@v7
+        with:
+          name: YouMod build ${{ env.VERSION }} roothide
+          path: ${{ github.workspace }}/*_iphoneos-arm64e.deb
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Update rolling release
+        run: |
+          REPO=${{ github.repository }}
+          SHA=$(git -C YouMod rev-parse HEAD)
+          if gh release view nightly --repo "$REPO" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$REPO/git/refs/tags/nightly" -f sha="$SHA" -F force=true
+          else
+            gh release create nightly --repo "$REPO" --target "$SHA" \
+              --title "Latest build" --notes "-"
+          fi
+          for a in $(gh release view nightly --repo "$REPO" --json assets -q '.assets[].name'); do
+            gh release delete-asset nightly "$a" --repo "$REPO" -y
+          done
+          gh release upload nightly --repo "$REPO" ./*.deb
+          NOTES=$(printf '%s\n' \
+            '# Add our repository to your package manager!' \
+            "[![Add repository to Sileo](https://img.shields.io/badge/Add%20repository%20to-Sileo-turquoise)](https://tonwalter888.github.io/youmod-repo/sileo.html) [![Add repository to Zebra](https://img.shields.io/badge/Add%20repository%20to-Zebra-white)](https://tonwalter888.github.io/youmod-repo/zebra.html)" \
+            '' \
+            "Build $VERSION - ${SHA::7} - $(git -C YouMod log -1 --pretty=%s)")
+          gh release edit nightly --repo "$REPO" --prerelease=false --notes "$NOTES"
+
+      - name: Build APT repo
+        run: |
+          mkdir -p site/debs && cp ./*.deb site/debs/
+          curl -fsSL "https://github.com/Tonwalter888/YouMod/blob/main/Icon.png?raw=true" -o site/CydiaIcon.png
+          echo '<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>Add to Sileo</title><script>location.href="sileo://source/https://tonwalter888.github.io/youmod-repo/"</script><a href="sileo://source/https://tonwalter888.github.io/youmod-repo/">Add to Sileo</a>' > site/sileo.html
+          echo '<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>Add to Zebra</title><script>location.href="zbra://sources/add/https://tonwalter888.github.io/youmod-repo/"</script><a href="zbra://sources/add/https://tonwalter888.github.io/youmod-repo/">Add to Zebra</a>' > site/zebra.html
+          echo '<a href="https://github.com/Tonwalter888/YouMod">GitHub repo</a> - <a href=sileo.html>Add to Sileo</a> - <a href=zebra.html>Add to Zebra</a>' > site/index.html
+          cd site
+          dpkg-scanpackages -m debs > Packages
+          gzip -k Packages
+          bzip2 -k Packages
+          printf '%s\n' \
+            'Origin: YouMod' \
+            'Label: YouMod' \
+            'Suite: stable' \
+            "Version: $VERSION" \
+            'Codename: ios' \
+            'Architectures: iphoneos-arm iphoneos-arm64 iphoneos-arm64e' \
+            'Components: main' \
+            "Description: Automated repository for YouMod's latest builds" > Release
+          cat Packages Release
+          ls -R .
+
+      - name: Publish APT repo to Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          personal_token: ${{ secrets.PAGES_TOKEN }}
+          external_repository: Tonwalter888/youmod-repo
+          publish_branch: main
+          publish_dir: site
+          force_orphan: true
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
